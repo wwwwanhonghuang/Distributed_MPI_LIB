@@ -16,11 +16,18 @@
 #include "shared_memory.hpp"
 #include <thread>
 #include <yaml-cpp/yaml.h>
+#include <condition_variable>
+
+
 typedef enum {
     UNCONNECTED,
     CONNETED
 } ClientStates;
 
+typedef enum {
+    PARTITION_PREPARED = 102,
+
+} MessageType;
 
 struct Client
 {
@@ -31,7 +38,11 @@ struct Client
 
 std::atomic<bool> keep_running(true);
 std::unordered_map<int, Client> client_map;
-std::mutex client_map_mutex;  
+
+std::mutex client_map_mutex;
+std::condition_variable barrier_cv;
+std::mutex barrier_mutex;
+int ack_count = 0;
 
 void push_msg(Message& msg, std::shared_ptr<SharedMemory> shared_memory){
     static int pos = 0;
@@ -49,15 +60,25 @@ void handleClient(int client_sock) {
     std::cout << "Handling client in thread: " << std::this_thread::get_id() << "\n";
 
     // Example: Echo received data back to the client
-    char buffer[1024] = {0};
-    ssize_t bytes_read = read(client_sock, buffer, sizeof(buffer));
+    Message msg_receive;
+    ssize_t bytes_read = read(client_sock, &msg_receive, sizeof(Message));
     if (bytes_read > 0) {
-        std::cout << "Received: " << buffer << "\n";
-        //send(client_sock, buffer, bytes_read, 0);
+        std::cout << "Received: " << "msg_type = " << msg_receive.msg_type << "\n";
+        switch (msg_receive.msg_type)
+        {
+        case PARTITION_PREPARED: {
+            {
+                std::lock_guard<std::mutex> lock(barrier_mutex);
+                ack_count++;
+            }
+            barrier_cv.notify_one(); // Notify the main thread
+            break;
+        }
+        default:
+            break;
+        }
     }
 
-    // Close the client socket after handling
-    std::cout << "Client handled\n";
 }
 
 void serverLoop(uint32_t port) {
@@ -114,15 +135,7 @@ void serverLoop(uint32_t port) {
             }
 
             std::cout << "Connection accepted" << "client socket = " << client_sock << ", creating thread to handle client.\n";
-            Client client;
-            client.sock = client_sock;
-            client.state = CONNETED;
-            {
-                // Lock the mutex to safely modify the shared client_map
-                std::lock_guard<std::mutex> lock(client_map_mutex);
-                client_map[client_sock] = client;
-            }
-            // Create a new thread to handle the client
+            
             std::thread client_thread(handleClient, client_sock);
             client_thread.detach();
         }
@@ -203,12 +216,17 @@ int main(int argc, char* argv[]) {
         inet_pton(AF_INET, ip.c_str(), &client_addr.sin_addr);
 
         if (connect(sock, (struct sockaddr*)&client_addr, sizeof(client_addr)) == 0) {
-            std::cout << "\t- connect " << ip << ":" << port << " success.\n";
+            std::cout << "\t- connect " << ip << ":" << port << " success." << " sock ="
+                << sock << " \n";
             connected_client ++;
-            // Client client;
-            // client.state = CONNETED;
-            // client.sock = sock;
-            // client_map[name] = client;
+            Client client;
+            client.state = CONNETED;
+            client.sock = sock;
+             {
+                // Lock the mutex to safely modify the shared client_map
+                std::lock_guard<std::mutex> lock(client_map_mutex);
+                client_map[sock] = client;
+            }
         } else {
             // perror("\t- connect failed");
             close(sock);
@@ -237,6 +255,14 @@ int main(int argc, char* argv[]) {
     std::cout << "Broadcast prepared message." << std::endl;
     Message partition_prepared_msg = gen_partition_prepared_msg(partition_id);
     broadcast_message(partition_prepared_msg);
+    // barrier
+    // wait for all client replay ack for PARTITION_PREPARED message.
+    {
+        std::unique_lock<std::mutex> lock(barrier_mutex);
+        barrier_cv.wait(lock, [&total_clients] { return ack_count == total_clients - 1; });
+    }
+    std::cout << "[barrier passed] All partition prepared!" << std::endl;
+
 
     // broadcast partition prepared_msg
     /*
