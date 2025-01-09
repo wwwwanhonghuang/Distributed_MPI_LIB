@@ -7,7 +7,17 @@
 #include "shared_memory.hpp"
 #include <string>
 #define SHARED_MEMORY_NAME "/shared_mem"
+int result = 0;
 
+void execution(int epoch, int partition_id){
+    std::cout << "partition " << partition_id << 
+            " begin execute epoch " << epoch << std::endl; 
+    int begin_i = (partition_id - 1) * 50;
+    int end_i = partition_id * 50;
+    for(int i = begin_i; i < end_i; i++){
+        result += i * partition_id;
+    }
+}
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "Please provide the instance index (i).\n";
@@ -24,6 +34,7 @@ int main(int argc, char** argv) {
     auto storage = (MemoryStorage*)(shared_memory->get_data());
     
     int pos = 0;
+
     while(true){
         auto& msg = storage->application_messages[pos];
         pos = (pos + 1) % 1;
@@ -40,6 +51,21 @@ int main(int argc, char** argv) {
             response_msg.status = MESSAGE_WAITING; 
             response_msg.msg_type = 100;
             memcpy(response_msg.data, response.c_str(), response.size() + 1);
+            memcpy(&storage->network_communicator_messages[0], &response_msg, sizeof(response_msg));
+            break;
+        }
+        case 103:{
+            msg.status = EMPTY_SLOT;
+            int epoch = -1;
+            memcpy(&epoch, &msg.data[0], sizeof(int));
+            execution(epoch, std::stoi(argv[1]));
+            
+            std::cout << "response msg [type 103]. result = " << result << std::endl;
+
+            Message response_msg;
+            response_msg.status = MESSAGE_WAITING; 
+            response_msg.msg_type = 103;
+            memcpy(response_msg.data, &result, sizeof(int));
             memcpy(&storage->network_communicator_messages[0], &response_msg, sizeof(response_msg));
             break;
         }

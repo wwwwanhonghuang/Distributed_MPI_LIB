@@ -26,7 +26,8 @@ typedef enum {
 
 typedef enum {
     PARTITION_PREPARED = 102,
-
+    BEGIN_EPOCH = 103,
+    EPOCH_COMPLETE = 104
 } MessageType;
 
 struct Client
@@ -40,9 +41,26 @@ std::atomic<bool> keep_running(true);
 std::unordered_map<int, Client> client_map;
 
 std::mutex client_map_mutex;
-std::condition_variable barrier_cv;
-std::mutex barrier_mutex;
-int ack_count = 0;
+std::mutex application_mutex;
+std::mutex result_mutex;
+
+
+// std::condition_variable barrier_cv;
+std::condition_variable partition_prepared_msg_cv;
+int partition_prepared_msg_ack_count;
+std::mutex partition_prepared_msg_ack_count_mutex;
+
+std::condition_variable begin_epoch_msg_cv;
+std::unordered_map<int, int> begin_epoch_msg_ack_count;
+std::mutex begin_epoch_msg_ack_count_mutex;
+
+std::condition_variable epoch_completed_msg_cv;
+std::unordered_map<int, int> epoch_completed_ack_count;
+std::mutex epoch_completed_ack_count_mutex;
+
+std::condition_variable application_cv;
+
+int global_result = 0;
 
 void push_msg(Message& msg, std::shared_ptr<SharedMemory> shared_memory){
     static int pos = 0;
@@ -61,25 +79,70 @@ void handleClient(int client_sock) {
 
     // Example: Echo received data back to the client
     Message msg_receive;
-    ssize_t bytes_read = read(client_sock, &msg_receive, sizeof(Message));
-    if (bytes_read > 0) {
-        std::cout << "Received: " << "msg_type = " << msg_receive.msg_type << "\n";
-        switch (msg_receive.msg_type)
-        {
-        case PARTITION_PREPARED: {
+    while(true){
+        ssize_t bytes_read = read(client_sock, &msg_receive, sizeof(Message));
+        if (bytes_read > 0) {
+            std::cout << "Received: " << "msg_type = " << msg_receive.msg_type << "\n";
+            switch (msg_receive.msg_type)
             {
-                std::lock_guard<std::mutex> lock(barrier_mutex);
-                ack_count++;
+            case PARTITION_PREPARED: {
+                {
+                    std::lock_guard<std::mutex> lock(partition_prepared_msg_ack_count_mutex);
+                    partition_prepared_msg_ack_count++;
+                    std::cout << "ACK " << PARTITION_PREPARED << " partition_prepared_msg_ack_count = " << 
+                                partition_prepared_msg_ack_count << std::endl;
+                }
+                partition_prepared_msg_cv.notify_one(); // Notify the main thread
+                break;
             }
-            barrier_cv.notify_one(); // Notify the main thread
-            break;
-        }
-        default:
-            break;
+            case EPOCH_COMPLETE: {
+                int epoch = -1;
+                int client_partition_id = -1;
+                int client_result = -1;
+                memcpy(&client_partition_id, msg_receive.data, sizeof(int));
+                memcpy(&epoch, &msg_receive.data[4], sizeof(int));
+                memcpy(&client_result, &msg_receive.data[8], sizeof(int));
+
+                std::cout << "[Client Service] client " <<  client_partition_id << " has completed epoch " << epoch <<
+                            " reported result = " << client_result << std::endl;
+                {
+                    std::lock_guard<std::mutex> lock(result_mutex);
+                    global_result += client_result;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(epoch_completed_ack_count_mutex);
+                    epoch_completed_ack_count[epoch]++;
+                    std::cout << "ACK " << EPOCH_COMPLETE << " epoch_completed_ack_count[" << epoch << 
+                            "] = " << epoch_completed_ack_count[epoch] << std::endl;
+                }
+                std::cout << "[Client Service] Notify one thread that waiting for barrier_cv" << std::endl;
+                epoch_completed_msg_cv.notify_one();
+                break;
+            }
+            case BEGIN_EPOCH:{
+                int epoch = -1;
+                int client_partition_id = -1;
+                memcpy(&client_partition_id, &msg_receive.data[4], sizeof(int));
+                memcpy(&epoch, &msg_receive.data[0], sizeof(int));
+                std::cout << "[Client Service] client " <<  client_partition_id << " prepare proceed epoch " << epoch << std::endl;
+                {
+                    std::lock_guard<std::mutex> lock(begin_epoch_msg_ack_count_mutex);
+                    begin_epoch_msg_ack_count[epoch]++;
+                    std::cout << "ACK " << BEGIN_EPOCH << " begin_epoch_msg_ack_count[" << epoch <<
+                        "] = " << begin_epoch_msg_ack_count[epoch] << std::endl;
+                }
+                
+                std::cout << "[Client Service] Notify one thread that waiting for barrier_cv" << std::endl;
+                begin_epoch_msg_cv.notify_one();
+                break;
+            }
+            default:
+                break;
+            }
         }
     }
-
 }
+
 
 void serverLoop(uint32_t port) {
     // Create a server socket
@@ -145,18 +208,12 @@ void serverLoop(uint32_t port) {
 void broadcast_message(const Message& message) {
     std::lock_guard<std::mutex> lock(client_map_mutex);
     for (const auto& [sock, client] : client_map) {
-        std::cout << "Sending message to " << client.name << " (socket " << client.sock << ")\n";
-
-        // Send the message
         ssize_t bytes_sent = send(client.sock, &message, sizeof(message), 0);
         if (bytes_sent < 0) {
             perror(("Failed to send message to " + client.name).c_str());
-        } else {
-            std::cout << "Message sent to " << client.name << ": " << bytes_sent << " bytes\n";
-        }
+        } 
     }
 }
-
 
 Message gen_network_component_prepared_msg(int partition_id){
     Message msg;
@@ -174,6 +231,16 @@ Message gen_partition_prepared_msg(int partition_id){
     return prepared_msg;
 };
 
+Message gen_epoch_finished_msg(int partition_id, int epoch, int result){
+    Message epoch_finished_msg;
+    epoch_finished_msg.status = MESSAGE_WAITING;
+    epoch_finished_msg.msg_type = EPOCH_COMPLETE;
+    memcpy(epoch_finished_msg.data, &partition_id, sizeof(int));
+    memcpy(&epoch_finished_msg.data[4], &epoch, sizeof(int));
+    memcpy(&epoch_finished_msg.data[8], &result, sizeof(int));
+
+    return epoch_finished_msg;
+}
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -248,8 +315,8 @@ int main(int argc, char* argv[]) {
     /* wait for application response */
     while(storage->network_communicator_messages[0].status == EMPTY_SLOT){}
     std::cout << "application repied: " <<  
-                storage->network_communicator_messages[0].data << std::endl;
-
+        storage->network_communicator_messages[0].data << std::endl;
+    storage->network_communicator_messages[0].status = EMPTY_SLOT;
 
     /* broadcast partition prepared message to all other partitions. */
     std::cout << "Broadcast prepared message." << std::endl;
@@ -257,35 +324,82 @@ int main(int argc, char* argv[]) {
     broadcast_message(partition_prepared_msg);
     // barrier
     // wait for all client replay ack for PARTITION_PREPARED message.
+    std::cout << total_clients << std::endl;
     {
-        std::unique_lock<std::mutex> lock(barrier_mutex);
-        barrier_cv.wait(lock, [&total_clients] { return ack_count == total_clients - 1; });
+        std::unique_lock<std::mutex> lock(partition_prepared_msg_ack_count_mutex);
+        partition_prepared_msg_cv.wait(lock, [&total_clients] { return partition_prepared_msg_ack_count == total_clients - 1; });
     }
     std::cout << "[barrier passed] All partition prepared!" << std::endl;
 
 
-    // broadcast partition prepared_msg
-    /*
-        for each client in clients:
-            send_msg("prepared from xxxx");
-    */
+    int epoches = 0;
+    const int MAX_EPOCHS = 3;
+    while(epoches < MAX_EPOCHS){
+        std::cout << std::endl;
+        std::cout << "[Main Loop] partition " << program_name << " begin epoch " << epoches << std::endl;
+        // let application begin algorithm.
+        Message epoch_begin_msg;
+        epoch_begin_msg.msg_type = BEGIN_EPOCH;
+        epoch_begin_msg.status = MESSAGE_WAITING;
+        memcpy(&epoch_begin_msg.data[0], &epoches, sizeof(int));
+        memcpy(&epoch_begin_msg.data[4], &partition_id, sizeof(int));
+
+        push_msg(epoch_begin_msg, shared_memory);
+        
+        // barrier EPOCH_START
+        broadcast_message(epoch_begin_msg);
+    
+        {
+            std::unique_lock<std::mutex> lock(begin_epoch_msg_ack_count_mutex);
+            begin_epoch_msg_cv.wait(lock, [&total_clients, &epoches] { return begin_epoch_msg_ack_count[epoches] == total_clients - 1; });
+        }
+
+        std::cout << "[Main Loop] [barrier passed] All partition prepare to proceed epoch " << epoches << "!" << std::endl;
+        
+
+        // wait application finished.
+        std::cout << "[Main Loop] wait application execution. " << std::endl;
+        
+        {
+            std::unique_lock<std::mutex> lock(application_mutex);
+            // application_cv.wait(lock, [&] { return storage->network_communicator_messages[0].status != EMPTY_SLOT; });
+            while(storage->network_communicator_messages[0].status == EMPTY_SLOT){
+
+            }
+            storage->network_communicator_messages[0].status = EMPTY_SLOT;
+        }
+        int application_result = -1;
+        memcpy(&application_result, storage->network_communicator_messages[0].data, sizeof(int));
+        
+        std::cout << "[Main Loop] application reply result " <<  
+            application_result << std::endl;
+        
+        storage->network_communicator_messages[0].status = EMPTY_SLOT;
+
+        Message epoch_finished_msg = gen_epoch_finished_msg(partition_id, epoches, application_result);
+        std::cout << "[Main Loop] Prepare and broadcast epoch " << epoches << "finished message." << std::endl;
+      
+        broadcast_message(epoch_finished_msg);
+        {
+            std::unique_lock<std::mutex> lock(epoch_completed_ack_count_mutex);
+            epoch_completed_msg_cv.wait(lock, [&total_clients, &epoches] { return epoch_completed_ack_count[epoches] == total_clients - 1; });
+        }
+        std::cout << "[Main Loop] [barrier passed] All partition Completed Epoch " << epoches << "!" << std::endl;
+        std::cout << "[Main Loop] Integrated Result = " << global_result  << " + " <<
+                application_result << "!" << std::endl;
+
+        epoches ++;
+        {
+            std::unique_lock<std::mutex> lock(result_mutex);
+            global_result = 0;
+        }
 
 
-    // shared std::unordered_set<std::string> host_names;
-    // thread on_client_msg_in() = {
-    //     msg <- ..
-    //     host_names.emplace(get_program_name(msg));
-    // }
-
-    // barrier: ensure all partition prepared.
-    // while(host_names.size() < total_clients){
-    //     std::cout << storage->network_communicator_messages[0].data << std::endl;
-    // }
+        std::cout << std::endl;
+    }
 
     std::cin.get();
     abort();
-    
-    
 
     return 0;
 }
