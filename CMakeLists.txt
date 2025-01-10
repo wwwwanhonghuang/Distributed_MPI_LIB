@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.10)
 project(SharedMemoryExample VERSION 1.0)
 
 # Set C++ standard
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # Specify the include directories
@@ -13,7 +13,7 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 
 # Add source files for shared memory library
 set(SHARED_MEMORY_SRC src/shared_memory.cpp)
-set(NETWORK_COMMUNICATOR_SRC network_communicator.cpp)
+set(NETWORK_COMMUNICATOR_SRC network_communicator.cpp src/services.cpp)
 # Create a static library from shared memory source files
 add_library(shared_memory STATIC ${SHARED_MEMORY_SRC})
 

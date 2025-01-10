@@ -1,7 +1,7 @@
 #ifndef SHAREDMEMORY_HPP
 #define SHAREDMEMORY_HPP
 
-#include "memory_region.h"
+#include "common/memory_region.h"
 #include "message.h"
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -14,7 +14,6 @@ typedef enum {
     CREATE_NEW,
     MAP_TO_EXIST
 } MEM_MODEL;
-
 
 typedef struct {
     Message application_messages[MSG_COUNT];

@@ -9,6 +9,13 @@ typedef enum {
     MESSAGE_PROCESSED = 3   // Message is processed and can be cleared
 } MessageStatus;
 
+typedef enum {
+    PARTITION_PREPARED = 100,
+    BEGIN_EPOCH = 103,
+    EPOCH_COMPLETE = 104,
+    NOTIFICATE_INTEGRATE_RESULT = 105
+} MessageType;
+
 typedef struct {
     char data[MSG_DATA_SIZE];
     uint32_t msg_type;
