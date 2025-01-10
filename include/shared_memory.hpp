@@ -2,7 +2,7 @@
 #define SHAREDMEMORY_HPP
 
 #include "common/memory_region.h"
-#include "message.h"
+#include "common/message.h"
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
