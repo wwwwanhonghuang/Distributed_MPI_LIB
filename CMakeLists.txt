@@ -25,3 +25,12 @@ target_link_libraries(application shared_memory)
 add_executable(network_communicator ${NETWORK_COMMUNICATOR_SRC})
 target_link_libraries(network_communicator shared_memory yaml-cpp)
 add_compile_options(-O0 -g)
+
+
+set_target_properties(network_communicator application PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+set_target_properties(shared_memory PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+)
