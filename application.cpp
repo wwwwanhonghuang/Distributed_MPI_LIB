@@ -9,6 +9,9 @@
 #define SHARED_MEMORY_NAME "/shared_mem"
 int result = 0;
 
+#define ACK(MSG_TYPE) (MSG_TYPE | (1 << 31))
+#define CLEAR_MSG(MSG) MSG.status = EMPTY_SLOT;
+
 void execution(int epoch, int partition_id){
     std::cout << "partition " << partition_id << 
             " begin execute epoch " << epoch << std::endl; 
@@ -44,18 +47,18 @@ int main(int argc, char** argv) {
         {
         case PARTITION_PREPARED:{
             std::cout << "response msg PARTITION_PREPARED" << std::endl;
-            msg.status = EMPTY_SLOT;
+            CLEAR_MSG(msg);
             const std::string& response = "Hi! This is a response for msg 100";
             
             Message response_msg;
             response_msg.status = MESSAGE_WAITING; 
-            response_msg.msg_type = PARTITION_PREPARED;
+            response_msg.msg_type = ACK(PARTITION_PREPARED);
             memcpy(response_msg.data, response.c_str(), response.size() + 1);
             memcpy(&storage->network_communicator_messages[0], &response_msg, sizeof(response_msg));
             break;
         }
         case BEGIN_EPOCH:{
-            msg.status = EMPTY_SLOT;
+            CLEAR_MSG(msg);
             int epoch = -1;
             memcpy(&epoch, &msg.data[0], sizeof(int));
             execution(epoch, std::stoi(argv[1]));
@@ -64,16 +67,21 @@ int main(int argc, char** argv) {
 
             Message response_msg;
             response_msg.status = MESSAGE_WAITING; 
-            response_msg.msg_type = BEGIN_EPOCH;
+            response_msg.msg_type = ACK(BEGIN_EPOCH);
             memcpy(response_msg.data, &result, sizeof(int));
             memcpy(&storage->network_communicator_messages[0], &response_msg, sizeof(response_msg));
             break;
         }
         case NOTIFICATE_INTEGRATE_RESULT: {
+            CLEAR_MSG(msg);
             int integrated_result = -1;
             memcpy(&integrated_result, &msg.data[0], sizeof(int));
             std::cout << "Get integrated result = " << integrated_result << std::endl;
             result = integrated_result;
+            Message response_msg;
+            response_msg.status = MESSAGE_WAITING; 
+            response_msg.msg_type = ACK(NOTIFICATE_INTEGRATE_RESULT);
+            memcpy(&storage->network_communicator_messages[0], &response_msg, sizeof(response_msg));
             break;
         }
         default:

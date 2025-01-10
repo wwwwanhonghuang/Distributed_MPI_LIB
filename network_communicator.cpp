@@ -309,6 +309,7 @@ int main(int argc, char* argv[]) {
             }
             storage->network_communicator_messages[0].status = EMPTY_SLOT;
         }
+        std::cout << "[Main Loop] Integrated result processed by application." << std::endl;
 
         epoch ++;
         {
